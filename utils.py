@@ -1,11 +1,13 @@
+from requests_html import HTMLSession
 import requests
 from lxml import html
-import tweepy
+from lxml.cssselect import CSSSelector
 from retrying import retry
-from config import API_KEY, API_SECRET_KEY, ACCESS_TOKEN, ACCESS_TOKEN_SECRET, INSIDER_SALES_URL, MIN_SALE_AMOUNT
 import logging
+import tweepy
 import time
 import random
+from config import API_KEY, API_SECRET_KEY, ACCESS_TOKEN, ACCESS_TOKEN_SECRET, INSIDER_SALES_URL, MIN_SALE_AMOUNT
 
 logger = logging.getLogger(__name__)
 
@@ -19,35 +21,50 @@ def get_table(page_content):
         'Ticker', 'Owner', 'Relationship', 'Date', 'Transaction', 'Cost',
         '#Shares', 'Value ($)', '#Shares Total', 'SEC Form 4'
     ]
-    rows = page_parsed.xpath('//table[@class="body-table"]//tr[contains(@class, "insider-sale-row-")]')
+    
+    content_pane_selector = CSSSelector('div.content')
+    content_pane = content_pane_selector(page_parsed)
+    
+    if not content_pane:
+        logger.warning("Content pane not found on the page.")
+        logger.debug(f"Page content: {page_content}")
+        return []
+    
+    table = content_pane[0].xpath('.//table[contains(@class, "insider-trading-table")]')
+    
+    if not table:
+        logger.warning("Insider trading table not found within the content pane.")
+        logger.debug(f"Content pane: {html.tostring(content_pane[0])}")
+        return []
+    
+    rows = table[0].xpath('.//tr')
     
     data_sets = []
-    for row in rows:
-        cols = row.xpath('./td//text()')
-        data_sets.append(dict(zip(headers, cols)))
+    for row in rows[1:]:  # Skip the header row
+        cols = row.xpath('.//td/text()')
+        cols = [col.strip() for col in cols if col.strip()]  # Remove empty values and strip whitespace
+        if len(cols) == len(headers):
+            data_sets.append(dict(zip(headers, cols)))
     
     return data_sets
+
+def get_page_with_requests_html(url):
+    session = HTMLSession()
+    response = session.get(url)
+    response.html.render()  # This renders the JavaScript
+    return response.html.html
 
 @retry(stop_max_attempt_number=3, wait_exponential_multiplier=1000, wait_exponential_max=10000)
 def get_insider_sales():
     try:
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/93.0.4577.82 Safari/537.36'
-        }
-        
-        response = requests.get(INSIDER_SALES_URL, headers=headers)
-        
-        if response.status_code == 403:
-            raise ValueError("Request blocked by the server (status code 403). Please try again later.")
-        elif response.status_code != 200:
-            raise ValueError(f"Request failed with status code {response.status_code}")
-        
+        page_content = get_page_with_requests_html(INSIDER_SALES_URL)
         logger.info("Insider sales page retrieved successfully.")
+        logger.debug(f"Full page content: {page_content}")  # Log the full HTML content
         
-        insider_sales_data = get_table(response.content)
+        insider_sales_data = get_table(page_content)
         
         logger.info(f"Found {len(insider_sales_data)} insider sales transactions.")
-        logger.info(f"Extracted data: {insider_sales_data}")  # Add this line to log the extracted data
+        logger.info(f"Extracted data: {insider_sales_data}")
         
         sales = []
         for sale in insider_sales_data:
@@ -72,7 +89,7 @@ def get_insider_sales():
         
         logger.info(f"Found {len(sales)} insider sales transactions over the minimum amount.")
         
-        time.sleep(random.uniform(1, 3))  # Add a random delay between requests
+        time.sleep(random.uniform(1, 3))
         
         return sales
     except Exception as e:
